@@ -5,6 +5,9 @@ import torch.nn as nn
 import math
 import torch.nn.functional as F
 from PIL import Image
+from PIL import ImageFile
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset

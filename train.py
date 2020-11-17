@@ -2,6 +2,7 @@
 #       对数据集进行训练
 #-------------------------------------#
 import os
+import neptune
 import numpy as np
 import time
 import torch
@@ -16,6 +17,10 @@ from nets.yolo_training import YOLOLoss,Generator
 from nets.yolo4 import YoloBody
 from tqdm import tqdm
 
+neptune.init(project_qualified_name='riconeptune/sandbox',  
+api_token='eyJhcGlfYWRkcmVzcyI6Imh0dHBzOi8vdWkubmVwdHVuZS5haSIsImFwaV91cmwiOiJo\
+    dHRwczovL3VpLm5lcHR1bmUuYWkiLCJhcGlfa2V5IjoiOWRjMWU1MWMtZWRkYS00NWM2LThlOTctYmE5MzkzOWRlZDBjIn0=')
+neptune.create_experiment()
 #---------------------------------------------------#
 #   获得类和先验框
 #---------------------------------------------------#
@@ -37,7 +42,7 @@ def get_lr(optimizer):
     for param_group in optimizer.param_groups:
         return param_group['lr']
 
-def fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,genval,Epoch,cuda):
+def fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,genval,Epoch,cuda,loss_list:list):
     total_loss = 0
     val_loss = 0
     start_time = time.time()
@@ -103,7 +108,16 @@ def fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,genval,Epo
     print('Total Loss: %.4f || Val Loss: %.4f ' % (total_loss/(epoch_size+1),val_loss/(epoch_size_val+1)))
 
     print('Saving state, iter:', str(epoch+1))
-    torch.save(model.state_dict(), 'logs/Epoch%d-Total_Loss%.4f-Val_Loss%.4f.pth'%((epoch+1),total_loss/(epoch_size+1),val_loss/(epoch_size_val+1)))
+    if loss_list == []:
+        torch.save(model.state_dict(), 'logs/Epoch%d-Total_Loss%.4f-Val_Loss%.4f.pth'%((epoch+1),total_loss/(epoch_size+1),val_loss/(epoch_size_val+1)))
+    else:
+        now_loss = val_loss/(epoch_size_val+1)
+        bol = [now_loss for loss in loss_list if now_loss < loss]
+        if (bol != []) and (epoch % 3 == 0):
+            torch.save(model.state_dict(), 'logs/Epoch%d-Total_Loss%.4f-Val_Loss%.4f.pth'%((epoch+1),total_loss/(epoch_size+1),val_loss/(epoch_size_val+1)))
+            print('save the best')
+    return val_loss/(epoch_size_val+1)
+
 
 #----------------------------------------------------#
 #   检测精度mAP和pr曲线计算参考视频
@@ -119,11 +133,11 @@ if __name__ == "__main__":
     #-------------------------------#
     #   tricks的使用设置
     #-------------------------------#
-    Cosine_lr = False
+    Cosine_lr = True
     mosaic = True
     # 用于设定是否使用cuda
     Cuda = True
-    smoooth_label = 0
+    smoooth_label = 1
     #-------------------------------#
     #   Dataloder的使用
     #-------------------------------#
@@ -134,7 +148,7 @@ if __name__ == "__main__":
     #   获得先验框和类
     #-------------------------------#
     anchors_path = 'model_data/yolo_anchors.txt'
-    classes_path = 'model_data/voc_classes.txt'   
+    classes_path = 'model_data/animal_classes.txt'   
     class_names = get_classes(classes_path)
     anchors = get_anchors(anchors_path)
     num_classes = len(class_names)
@@ -188,9 +202,9 @@ if __name__ == "__main__":
     #------------------------------------------------------#
     if True:
         lr = 1e-3
-        Batch_size = 4
+        Batch_size = 18
         Init_Epoch = 0
-        Freeze_Epoch = 50
+        Freeze_Epoch = 30
         
         optimizer = optim.Adam(net.parameters(),lr,weight_decay=5e-4)
         if Cosine_lr:
@@ -201,9 +215,9 @@ if __name__ == "__main__":
         if Use_Data_Loader:
             train_dataset = YoloDataset(lines[:num_train], (input_shape[0], input_shape[1]), mosaic=mosaic)
             val_dataset = YoloDataset(lines[num_train:], (input_shape[0], input_shape[1]), mosaic=False)
-            gen = DataLoader(train_dataset, batch_size=Batch_size, num_workers=4, pin_memory=True,
+            gen = DataLoader(train_dataset, batch_size=Batch_size, num_workers=os.cpu_count(), pin_memory=True,
                                     drop_last=True, collate_fn=yolo_dataset_collate)
-            gen_val = DataLoader(val_dataset, batch_size=Batch_size, num_workers=4,pin_memory=True, 
+            gen_val = DataLoader(val_dataset, batch_size=Batch_size, num_workers=os.cpu_count(),pin_memory=True, 
                                     drop_last=True, collate_fn=yolo_dataset_collate)
         else:
             gen = Generator(Batch_size, lines[:num_train],
@@ -219,15 +233,18 @@ if __name__ == "__main__":
         for param in model.backbone.parameters():
             param.requires_grad = False
 
+        loss_list = []
         for epoch in range(Init_Epoch,Freeze_Epoch):
-            fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,gen_val,Freeze_Epoch,Cuda)
+            new_loss = fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,gen_val,Freeze_Epoch,Cuda, loss_list)
+            loss_list.append(new_loss)
             lr_scheduler.step()
+            neptune.log_metric('validation loss', new_loss)
 
     if True:
         lr = 1e-4
         Batch_size = 2
-        Freeze_Epoch = 50
-        Unfreeze_Epoch = 100
+        Freeze_Epoch = 30
+        Unfreeze_Epoch = 90
 
         optimizer = optim.Adam(net.parameters(),lr,weight_decay=5e-4)
         if Cosine_lr:
@@ -257,5 +274,5 @@ if __name__ == "__main__":
             param.requires_grad = True
 
         for epoch in range(Freeze_Epoch,Unfreeze_Epoch):
-            fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,gen_val,Unfreeze_Epoch,Cuda)
+            fit_one_epoch(net,yolo_losses,epoch,epoch_size,epoch_size_val,gen,gen_val,Unfreeze_Epoch,Cuda, loss_list)
             lr_scheduler.step()
